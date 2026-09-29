@@ -1,0 +1,198 @@
+---
+title: "Отчет"
+author: "Nikita Burlov"
+date: "2024-02-10"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(readxl)
+library(knitr)
+library(tidyverse)
+library(tidybayes)
+library(ggdist)
+library(epiR)
+library(gt)
+df_DVT <- read_excel("Data/Original/df.xlsx")
+df_DVT$Wells_group1 <- factor(ifelse(df_DVT$Wells_group == 1, "Yes", "No"), levels = c("Yes", "No"))
+df_DVT$DVT1 <- factor(ifelse(df_DVT$DVT == 1, "Yes", "No"), levels = c("Yes", "No"))
+```
+
+### Statistical analysis
+Diagnostic parameters were evaluated: sensitivity, specificity, positive and negative predictive value (PPV and NPV), positive and negative likelihood ratio (LR+ and LR-). Based on the literature data, a priors of sensitivity and specificity of the Wells score (67% and 90%, respectively) were used through the beta distribution (alpha1 = 12, beta1 = 6; alpha2 = 47, beta2 = 5) [doi: 10.1186/s13017-016-0078-1], then a posterior distribution was obtained based on our own data. After 10,000 iterations through LR+ and LR- post-test probability values (PPV and NPV) were obtained for each prevalence (pre-test probability from 1% to 99%), later we calculated estimate and 89% credible interval. For statistical processing, we used the open source software R version 4.2.2 (The R Foundation, http://www.R-project.org) with packages «tidyverse», «epiR», «gt», «ggplot2», «tidybayes», «ggdist».
+
+### Results
+  
+Table 1. The two-by-two contingency table.  
+```{r}
+test <- epi.tests(table(df_DVT$Wells_group1, df_DVT$DVT1), conf.level = 0.95, digits = 4)
+
+data.frame("Test" = c("+", "-", "Total"),
+           "Var1" = c(429, 33, 462),
+           "Var2" = c(38,367,405),
+           "Total" = c(467,400,867)) |> 
+  gt() |> 
+  cols_align(align = "center") |> 
+  tab_spanner(label = md("**Outcome**"), columns = starts_with(c("Var1", "Var2"))) |> 
+  cols_label(Test = md("**Test**"),
+             Var1 = md("**+**"),
+             Var2 = md("**-**"),
+             Total = md("**Total**")) |> 
+  tab_style(style = list(
+      cell_text(weight = "bold")),
+    locations = cells_body(columns = Test)) |> 
+  cols_width(everything() ~ px(100))
+```
+  
+Our research data on test results and outcomes. 
+  
+Table 2. Diagnostic characteristics.  
+```{r}
+summary(test) |> 
+  as_tibble() |> 
+  slice(2,3,4,9:12) |> 
+  gt() |> 
+  fmt_number(rows = 1:5, n_sigfig = 4, scale_by = 100) |> 
+  fmt_number(rows = 6, n_sigfig = 4, scale_by = 1) |> 
+  fmt_number(rows = 7, n_sigfig = 2, scale_by = 1) |> 
+  text_case_match(
+    "tp" ~ "Prevalence, %", 
+    "se"~ "Sensitivity, %", 
+    "sp"~"Specificity, %", 
+    "pv.pos"~"PPV, %", 
+    "pv.neg"~"NPV, %", 
+    "lr.pos"~"LR+", 
+    "lr.neg"~"LR-") |> 
+  cols_merge(columns = c(lower, upper),
+             pattern = md("{1} &mdash; {2}")) |> 
+  cols_label(statistic = "Parameters",
+             est = "Estimate",
+             lower = "95% CI",
+             .fn = md) |> 
+  cols_align(align = "center") |> 
+  cols_width(everything() ~ px(120))
+```
+  
+  PPV - positive predictive value, NPV - negative predictive value, LR+ - likelihood ratio positive, LR- - likelihood ratio negative, CI - confidence interval.
+  
+Figure 1. Priors and posteriors for sensitivity and specificity.  
+```{r}
+conf_mat <- matrix(
+  c(429, 33, 38, 367), nrow = 2,
+  dimnames = list(
+    c("T+", "T-"),
+    c("D+", "D-")
+  )
+)
+
+tribble(
+  ~par, ~dist, ~alpha, ~beta,
+  "Sensitivity", "Prior", 12, 6,
+  "Sensitivity", "Posterior", 12 + conf_mat["T+", "D+"], 6 + conf_mat["T-", "D+"],
+  "Specificity", "Prior", 47, 5,
+  "Specificity", "Posterior", 47 + conf_mat["T-", "D-"], 5 + conf_mat["T+", "D-"],
+) %>% 
+  ggplot(aes(xdist = distributional::dist_beta(alpha, beta))) +
+  stat_slab(aes(fill = dist), alpha = 0.5) +
+  facet_wrap(~par, nrow = 1) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "none") +
+  labs(x = "Propability", y = "Density") +
+  scale_fill_manual(values = c("#A93226", "#2471A3"))
+```
+  
+  Blue density plot - prior beta distribution, red density plot - posterior beta distribution.
+  
+We used literature data on the sensitivity and specificity of the Wells test (67% and 90%, respectively). [doi: 10.1186/s13017-016-0078-1]
+  
+Figure 2. Dependence of post-test probability on prevalence.  
+```{r}
+n_samles <- 10000
+
+df_samples <- tibble(
+  Sensitivity = rbeta(n_samles, 12 + conf_mat["T+", "D+"], 6 + conf_mat["T-", "D+"]),
+  Specificity = rbeta(n_samles, 47 + conf_mat["T-", "D-"], 5 + conf_mat["T+", "D-"])
+) |> 
+  mutate(
+    `LR+` = Sensitivity / (1 - Specificity),
+    `LR-` = (1 - Sensitivity) / Specificity
+  )
+
+prev <- seq(0.01, 0.99, length.out = 100)
+
+tibble(
+  prev, 
+  res = list(df_samples)
+) |> 
+  unnest(res) |> 
+  mutate(
+    PPV = plogis(log((`LR+` * prev / (1 - prev)))),
+    NPV = plogis(log((`LR-` * prev / (1 - prev))))
+  ) |> 
+  ggplot(aes(prev)) +
+  stat_lineribbon(aes(y = PPV, color = "PPV", fill = "PPV"), .width = c(0.89)) +
+  stat_lineribbon(aes(y = NPV, color = "NPV", fill = "NPV"), .width = c(0.89)) +
+  theme_minimal() +
+  scale_color_manual(name = NULL, 
+                     breaks=c('PPV', 'NPV'),
+                     values=c('PPV'='#E67E22', 'NPV'='#3498DB')) +
+  scale_fill_manual(name = NULL, 
+                     breaks=c('PPV', 'NPV'),
+                     values=alpha(c('PPV'='#E67E22', 'NPV'='#3498DB'),0.3),
+                     guide = "none") +
+  theme(text = element_text(size = 16), legend.position = c(.1, .92)) +
+  labs(x = "Prevalence", y = "Probability") +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1), labels = scales::percent) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), labels = scales::percent)
+```
+  
+  PPV - positive post-test probability. NPV - negative post-test probability. Saturated lines are a point estimate of probability, semitransparent areas are 89% credible interval.
+  
+The graph also shows that starting from about 30% of the prevalence, you can be fairly sure of a positive (gradually coming to a plateau) or negative (still on a plateau) result of the Wells test.
+  
+Table 3. Post-test probability depending on prevalence.  
+```{r}
+
+df <- tibble(
+  prev, 
+  res = list(df_samples)
+) |> 
+  unnest(res) |> 
+  mutate(
+    PPV = plogis(log((`LR+` * prev / (1 - prev)))),
+    NPV = plogis(log((`LR-` * prev / (1 - prev)))))
+
+df1 <- df*100 
+  
+df1 |> 
+  mutate(prev = round(prev,0)) |> 
+  reframe(PPV1 = round(median(PPV), digits = 2),
+          PPV_CI = paste0(round(quantile(PPV, 0.055), digits = 2), " – ", 
+                       round(quantile(PPV, 0.945), digits = 2)), 
+          NPV1 = round(median(NPV), digits = 2),
+          NPV_CI = paste0(round(quantile(NPV, 0.055), digits = 2), " – ", 
+                          round(quantile(NPV, 0.945), digits = 2)), 
+          .by = prev) |> 
+  filter(!(prev %% 5) | prev == 1) |> 
+  gt() |> 
+  cols_merge(columns = c(PPV1, PPV_CI),
+             pattern = "<<{1} ({2})>>") |> 
+  cols_merge(columns = c(NPV1, NPV_CI),
+             pattern = "<<{1} ({2})>>") |> 
+  cols_label(PPV1 = "PPV<br>(89% CI),%",
+             NPV1 = "NPV<br>(89% CI),%",
+             prev = "Pre-test<br>probability, %",
+             .fn = md) |> 
+  cols_align(align = "center")
+```
+  
+  PPV - positive post-test probability. NPV - negative post-test probability. CI - Credible interval. The pre-test probability corresponds to the prevalence of DVT in the population. A positive result was considered to be a value on the Wells scale of 2 points or higher.
+  
+According to the data obtained, we can say that with a prevalence of DVT in the population above 30%, one can be fairly confident in the test result, since a positive post-test probability will be about 80% (with a probability of 89%, the true result lies in the range of 77-85%), and a negative one is about 4% (true in the range of 3-5%).
